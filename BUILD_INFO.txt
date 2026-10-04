@@ -1,0 +1,6 @@
+The Forge
+Build: 2026-10-04
+Pass: 624
+Stamp: 9s56
+Copyright (c) 2026 Yannie D. Forest. All rights reserved.
+NO LICENCE IS GRANTED.
