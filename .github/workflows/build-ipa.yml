@@ -1,0 +1,137 @@
+# THE FORGE  |  Copyright (c) 2026 Yannie D. Forest. All rights reserved.
+# NO LICENCE IS GRANTED. See LICENCE.txt.
+#
+# Builds The Forge for iPhone and iPad on GitHub's own Mac computers, so no
+# Mac and no Xcode of your own are needed. It makes one file, TheForge.ipa,
+# which works on both iPhone and iPad, and puts it on the Releases page.
+# It runs by itself whenever something is uploaded to the repository, and by
+# hand from the Actions tab ("Build The Forge for iPhone and iPad",
+# "Run workflow").
+#
+# Before publishing, the app is opened in Apple's iPad and iPhone simulators
+# and photographed; the photographs are kept with the run ("Artifacts").
+#
+# The IPA is NOT signed. Apple only lets a signed app run, so it is signed when
+# you install it, by Sideloadly with your Apple ID (or installed by TrollStore
+# on the iOS versions it supports). See READ ME FIRST.txt.
+#
+# Cost: for a PRIVATE repository GitHub counts each minute on a Mac computer
+# as ten minutes of your monthly allowance (as far as I know). Please check
+# GitHub's current figures on its billing pages.
+#
+# Made by The Forge from the recipe that builds Carpe Diem for iPhone and iPad.
+
+name: Build The Forge for iPhone and iPad
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ipa:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Get the project
+        uses: actions/checkout@v4
+
+      - name: Find the Xcode project
+        run: |
+          P=$(find . -maxdepth 3 -name '*.xcodeproj' -not -path './.git/*' | head -n 1)
+          if [ -z "$P" ]; then echo "No .xcodeproj found. Upload the CONTENTS of the iPhone and iPad project folder."; exit 1; fi
+          echo "PROJ_DIR=$(cd "$(dirname "$P")" && pwd)" >> "$GITHUB_ENV"
+          echo "PROJ=$(basename "$P")" >> "$GITHUB_ENV"
+          xcodebuild -version
+
+      - name: Build the app
+        run: |
+          cd "$PROJ_DIR"
+          set -o pipefail
+          test -f "TheForge/www/the_forge.html" || { echo "TheForge/www/the_forge.html is missing. Upload the CONTENTS of the iPhone and iPad project folder again."; exit 1; }
+          for SDK in iphoneos iphonesimulator; do
+            xcodebuild -project "$PROJ" -target TheForge -configuration Release -sdk "$SDK" \
+              SYMROOT="$RUNNER_TEMP/build-$SDK" \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+              build >> "$RUNNER_TEMP/build-log.txt" 2>&1
+            echo "built for $SDK"
+          done
+
+      - name: If the build failed, show why
+        if: failure()
+        run: |
+          grep -n "error:" "$RUNNER_TEMP/build-log.txt" | head -n 40 || echo "(no lines with error:)"
+          tail -n 60 "$RUNNER_TEMP/build-log.txt" || echo "(no build log was written)"
+
+      - name: Pack the IPA
+        run: |
+          APP="$RUNNER_TEMP/build-iphoneos/Release-iphoneos/TheForge.app"
+          test -f "$APP/www/the_forge.html"
+          rm -rf "$RUNNER_TEMP/ipa"; mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          (cd "$RUNNER_TEMP/ipa" && zip -qry "$GITHUB_WORKSPACE/TheForge.ipa" Payload)
+          echo "TheForge.ipa: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"), version $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist"), $(ls -la "$GITHUB_WORKSPACE/TheForge.ipa" | awk '{print $5}') bytes"
+
+      - name: Open the app in the iPad and iPhone simulators
+        run: |
+          mkdir -p "$RUNNER_TEMP/shots"
+          pick() {   # first available device whose name starts with $1, on the newest iOS
+            xcrun simctl list devices available -j | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)['devices']
+          rts=sorted([k for k in d if 'iOS' in k], key=lambda k:[int(x) for x in k.split('iOS-')[-1].split('-')])
+          for rt in reversed(rts):
+              for dev in d[rt]:
+                  if dev['name'].startswith('$1'): print(dev['udid']); sys.exit(0)
+          "
+          }
+          APP="$RUNNER_TEMP/build-iphonesimulator/Release-iphonesimulator/TheForge.app"
+          BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")
+          for KIND in iPad iPhone; do
+            UDID=$(pick "$KIND")
+            if [ -z "$UDID" ]; then echo "No $KIND simulator available"; continue; fi
+            echo "$KIND simulator: $UDID"
+            xcrun simctl boot "$UDID" || true
+            xcrun simctl bootstatus "$UDID" -b > /dev/null
+            xcrun simctl install "$UDID" "$APP"
+            xcrun simctl launch "$UDID" "$BID"
+            sleep 40
+            xcrun simctl io "$UDID" screenshot "$RUNNER_TEMP/shots/$KIND.png"
+            xcrun simctl terminate "$UDID" "$BID" || true
+            xcrun simctl shutdown "$UDID" || true
+          done
+          ls -la "$RUNNER_TEMP/shots"
+
+      - name: Keep the photographs with this run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulator-photographs
+          path: ${{ runner.temp }}/shots
+          if-no-files-found: warn
+
+      - name: Keep the IPA with this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: the-forge-ipa
+          path: TheForge.ipa
+          if-no-files-found: error
+
+      - name: Put the IPA on the Releases page
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG=the-forge-ipa
+          PASS=$(grep -m1 '^Pass:' "$PROJ_DIR/BUILD_INFO.txt" | tr -dc '0-9' || true)
+          NOTES="The Forge for iPhone and iPad, build ${PASS}. TheForge.ipa works on iPhone and iPad. Built $(date -u '+%d %B %Y, %H:%M UTC') from branch ${GITHUB_REF_NAME}, commit ${GITHUB_SHA:0:7}.
+          This IPA is unsigned. Install it with Sideloadly over USB (it signs with your Apple ID), or with TrollStore. See READ ME FIRST.txt."
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" TheForge.ipa --clobber
+            gh release edit "$TAG" --notes "$NOTES"
+          else
+            gh release create "$TAG" TheForge.ipa --target "$GITHUB_SHA" \
+              --title "The Forge for iPhone and iPad" --notes "$NOTES"
+          fi
